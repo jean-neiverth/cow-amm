@@ -38,11 +38,11 @@ contract SevenAssetSettlementToken is ERC20 {
 }
 
 /// @notice Tests actual token-moving settlements, not a solver auction or LVR guarantee.
-contract SevenAssetCoWSettlementTest is Test {
+abstract contract SevenAssetSettlementChecks is Test {
   using GPv2Order for GPv2Order.Data;
 
-  ISettlement internal constant SETTLEMENT = ISettlement(0x9008D19f58AAbD9eD0D60971565AA8510560ab41);
-  address internal constant SOLVER = 0x423cEc87f19F0778f549846e0801ee267a917935;
+  ISettlement internal settlement;
+  address internal solver;
   uint256 internal constant TRADER_KEY = 0x123456;
   BCoWPool internal pool;
   BCoWHelper internal helper;
@@ -64,10 +64,14 @@ contract SevenAssetCoWSettlementTest is Test {
     GPv2Interaction.Data[][3] interactions;
   }
 
-  function setUp() public {
-    vm.createSelectFork('mainnet', 20_012_063);
+  function _setUpPool(
+    ISettlement settlement_,
+    address solver_
+  ) internal {
+    settlement = settlement_;
+    solver = solver_;
     trader = vm.addr(TRADER_KEY);
-    BCoWFactory factory = new BCoWFactory(address(SETTLEMENT), bytes32('seven-asset-test'), address(this));
+    BCoWFactory factory = new BCoWFactory(address(settlement), bytes32('seven-asset-test'), address(this));
     helper = new BCoWHelper(address(factory));
     pool = BCoWPool(address(factory.newBPool('M7 portfolio', 'M7')));
     uint8[7] memory decimals = [uint8(18), 6, 8, 18, 6, 18, 8];
@@ -91,12 +95,12 @@ contract SevenAssetCoWSettlementTest is Test {
 
   function test_SevenAssetSettlementPreservesSharesAndUntouchedReserves() public {
     prices[0] = prices[0] * 11 / 10;
-    _executeAndVerify(true, SOLVER);
+    _executeAndVerify(true, solver);
   }
 
   function test_LargePriceMoveSettlesWithBoundedCandidate() public {
     prices[5] *= 5;
-    _executeAndVerify(true, SOLVER);
+    _executeAndVerify(true, solver);
   }
 
   function test_SettlementRequiresAuthorizedSolver() public {
@@ -106,7 +110,7 @@ contract SevenAssetCoWSettlementTest is Test {
 
   function test_SettlementRequiresPoolCommitment() public {
     prices[0] = prices[0] * 11 / 10;
-    _executeAndVerify(false, SOLVER);
+    _executeAndVerify(false, solver);
   }
 
   function _executeAndVerify(
@@ -115,18 +119,18 @@ contract SevenAssetCoWSettlementTest is Test {
   ) internal {
     Batch memory batch = _prepareBatch(includeCommitment);
     uint256 invariantBefore = _pairInvariant(batch.sellIndex, batch.buyIndex);
-    if (sender != SOLVER) vm.expectRevert(bytes('GPv2: not a solver'));
+    if (sender != solver) vm.expectRevert(bytes('GPv2: not a solver'));
     else if (!includeCommitment) vm.expectRevert(IBCoWPool.OrderDoesNotMatchCommitmentHash.selector);
     vm.prank(sender);
-    SETTLEMENT.settle(tokens, batch.clearingPrices, batch.trades, batch.interactions);
-    if (sender != SOLVER || !includeCommitment) return;
+    settlement.settle(tokens, batch.clearingPrices, batch.trades, batch.interactions);
+    if (sender != solver || !includeCommitment) return;
 
     for (uint256 i; i < 7; ++i) {
       uint256 expected = balancesBefore[i];
       if (i == batch.sellIndex) expected -= batch.order.sellAmount;
       if (i == batch.buyIndex) expected += batch.received;
       assertEq(tokens[i].balanceOf(address(pool)), expected);
-      assertEq(tokens[i].balanceOf(address(SETTLEMENT)), 0);
+      assertEq(tokens[i].balanceOf(address(settlement)), 0);
     }
     assertEq(pool.totalSupply(), supplyBefore);
     assertEq(pool.balanceOf(address(this)), lpSharesBefore);
@@ -172,9 +176,9 @@ contract SevenAssetCoWSettlementTest is Test {
     counterOrder.sellAmount = batch.received;
     counterOrder.buyAmount = batch.order.sellAmount;
     counterOrder.partiallyFillable = false;
-    (uint8 v, bytes32 r, bytes32 s) = vm.sign(TRADER_KEY, counterOrder.hash(SETTLEMENT.domainSeparator()));
+    (uint8 v, bytes32 r, bytes32 s) = vm.sign(TRADER_KEY, counterOrder.hash(settlement.domainSeparator()));
     SevenAssetSettlementToken(address(counterOrder.sellToken)).mint(trader, batch.received);
-    address relayer = SETTLEMENT.vaultRelayer();
+    address relayer = settlement.vaultRelayer();
     vm.prank(trader);
     counterOrder.sellToken.approve(relayer, batch.received);
     return _trade(counterOrder, batch.buyIndex, batch.sellIndex, GPv2Signing.Scheme.Eip712, abi.encodePacked(r, s, v));
@@ -222,5 +226,12 @@ contract SevenAssetCoWSettlementTest is Test {
     uint256 secondBalance = tokens[second].balanceOf(address(pool)) * 1e6 / 10
       ** SevenAssetSettlementToken(address(tokens[second])).decimals();
     return firstBalance ** (weights[first] / 2) * secondBalance ** (weights[second] / 2);
+  }
+}
+
+contract SevenAssetCoWSettlementTest is SevenAssetSettlementChecks {
+  function setUp() public {
+    vm.createSelectFork('mainnet', 20_012_063);
+    _setUpPool(ISettlement(0x9008D19f58AAbD9eD0D60971565AA8510560ab41), 0x423cEc87f19F0778f549846e0801ee267a917935);
   }
 }
