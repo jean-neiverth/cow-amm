@@ -100,9 +100,14 @@ async function deployM7() {
     await (await pool.bind(token.address, balance, ethers.utils.parseEther(String(weights[index])))).wait();
     tokens.push({ symbol: symbols[index], address: token.address, decimals: decimals[index], weight: weights[index] });
   }
-  await (await pool.setSwapFee('999999000000000000')).wait();
+  const protectiveFee = await pool.MAX_FEE();
+  await (await pool.setSwapFee(protectiveFee)).wait();
+  assert.ok((await pool.getSwapFee()).eq(protectiveFee), 'Protective fee missing before finalization');
   await (await pool.finalize()).wait();
+  assert.ok(await pool.isFinalized(), 'Pool was not finalized');
+  assert.ok((await pool.getSwapFee()).eq(protectiveFee), 'Protective fee missing after finalization');
   const state = {
+    protectiveFee: protectiveFee.toString(),
     chainId, authentication: authentication.address, settlement: settlement.address,
     vaultRelayer: await settlement.vaultRelayer(), factory: factory.address, helper: helper.address,
     pool: pool.address, manager: manager.address, solver: solver.address, trader: trader.address,
@@ -192,6 +197,8 @@ async function verifyM7(state, quiet = false) {
   assert.ok(last, 'Run local:settle before verifying');
   const pool = await contract('BCoWPool', state.pool);
   const authentication = await contract('GPv2AllowListAuthentication', state.authentication);
+  assert.ok((await pool.getSwapFee()).eq(await pool.MAX_FEE()), 'Pool does not have the protective direct-swap fee');
+  assert.ok(await pool.isFinalized(), 'Pool is not finalized');
   const receipt = await provider.getTransactionReceipt(last.transactionHash);
   assert.equal(receipt?.status, 1, 'Settlement transaction did not succeed');
   assert.equal(receipt.from.toLowerCase(), state.solver.toLowerCase());
@@ -219,6 +226,63 @@ async function verifyM7(state, quiet = false) {
   })));
   console.log('Verified: matched balances, five untouched reserves, unchanged LP shares, and increased weighted invariant.');
   console.log(`LP surplus: ${ethers.utils.formatUnits(BigInt(last.received) - BigInt(last.minimum), state.tokens[last.buyIndex].decimals)} ${state.tokens[last.buyIndex].symbol}`);
+}
+
+// Exercise proportional liquidity in separate transactions, before and after
+// settlement. A settlement's transient lock must never be cleared artificially.
+async function roundTripLiquidity(state) {
+  const pool = await contract('BCoWPool', state.pool);
+  const before = (await balances(state)).map(BigInt);
+  const walletBefore = (await balances(state, manager.address)).map(BigInt);
+  const supply = BigInt((await pool.totalSupply()).toString());
+  const lpShares = BigInt((await pool.balanceOf(manager.address)).toString());
+  const shares = supply / 10n;
+  const unit = 10n ** 18n;
+  const ratio = (shares * unit + supply / 2n) / supply;
+  const deposited = before.map((amount) => (amount * ratio + unit / 2n) / unit);
+  for (let index = 0; index < state.tokens.length; ++index) {
+    const token = await contract('LocalStockToken', state.tokens[index].address);
+    await (await token.mint(manager.address, deposited[index].toString())).wait();
+    await (await token.approve(state.pool, deposited[index].toString())).wait();
+  }
+  const join = await (await pool.joinPool(shares.toString(), deposited.map(String))).wait();
+  assert.equal(BigInt((await pool.totalSupply()).toString()), supply + shares);
+  assert.equal(BigInt((await pool.balanceOf(manager.address)).toString()), lpShares + shares);
+  const joined = (await balances(state)).map(BigInt);
+  const walletJoined = (await balances(state, manager.address)).map(BigInt);
+  joined.forEach((amount, index) => {
+    assert.equal(amount, before[index] + deposited[index]);
+    assert.equal(walletJoined[index], walletBefore[index]);
+  });
+  const exitRatio = (shares * unit + (supply + shares) / 2n) / (supply + shares);
+  const withdrawn = joined.map((amount) => (amount * exitRatio + unit / 2n) / unit);
+  const exit = await (await pool.exitPool(shares.toString(), withdrawn.map(String))).wait();
+  const after = (await balances(state)).map(BigInt);
+  const walletAfter = (await balances(state, manager.address)).map(BigInt);
+  after.forEach((amount, index) => {
+    assert.equal(amount, joined[index] - withdrawn[index]);
+    assert.equal(walletAfter[index], walletJoined[index] + withdrawn[index]);
+  });
+  assert.equal(BigInt((await pool.totalSupply()).toString()), supply);
+  assert.equal(BigInt((await pool.balanceOf(manager.address)).toString()), lpShares);
+  assert.ok((await pool.getSwapFee()).eq(await pool.MAX_FEE()));
+  state.liquidityChecks ??= [];
+  state.liquidityChecks.push({ joinTransaction: join.transactionHash, exitTransaction: exit.transactionHash,
+    shares: shares.toString(), deposited: deposited.map(String), withdrawn: withdrawn.map(String) });
+  await save(state);
+  console.log('Verified proportional deposit/withdrawal and restored LP shares at the protective fee.');
+}
+
+async function protectionM7() {
+  const state = await load();
+  const checksBefore = state.liquidityChecks?.length ?? 0;
+  await roundTripLiquidity(state);
+  await settleM7(state);
+  await roundTripLiquidity(state);
+  // A second settlement proves that order generation uses the post-liquidity
+  // reserves and leaves local:verify pointing at the final state.
+  await settleM7(state);
+  assert.equal(state.liquidityChecks.length, checksBefore + 2);
 }
 
 // Fixed-point total variation distance from the target portfolio weights.
@@ -291,7 +355,8 @@ try {
     case 'settle': await settleM7(); break;
     case 'verify': await verifyM7(); break;
     case 'rebalance': await rebalanceM7(); break;
-    default: throw new Error('Usage: node script/local/m7.mjs deploy|settle|verify|rebalance [--check]');
+    case 'protection': await protectionM7(); break;
+    default: throw new Error('Usage: node script/local/m7.mjs deploy|settle|verify|rebalance [--check]|protection');
   }
 } catch (error) {
   console.error(error.reason ?? error.message);

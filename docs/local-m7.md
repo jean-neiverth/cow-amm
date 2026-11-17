@@ -171,3 +171,74 @@ a minimum number of trades: an already balanced pool may stop immediately.
 The deployment manifest records prices, initial/final drift, tolerance,
 stopping reason, and each settlement's transaction hash, pair, and drift under
 `rebalance`. `local:verify` continues to verify the most recent settlement.
+
+## Direct-swap protection
+
+The supported local and Sepolia pool-creation scripts explicitly set `MAX_FEE`
+(99.9999%) and check it before and after finalization. `local:verify` also checks
+that the pool is finalized and still has this fee. The deployment manifest
+records `protectiveFee`.
+
+This setting applies to inherited `swapExactAmountIn` and `swapExactAmountOut`
+curve swaps. CoW helper orders and pool verification use zero-fee curve math,
+so the protective direct-swap fee does not charge CoW orders 99.9999%.
+Proportional deposits and withdrawals do not use this swap fee either.
+
+With Anvil running, verify deposits, settlement, withdrawals, and subsequent
+settlement on a fresh pool:
+
+```sh
+npm run test:local:protection
+npm run local:verify
+```
+
+The first command deposits and withdraws 10% of the LP share supply, executes a
+CoW settlement, repeats the deposit/withdrawal, and settles again against the
+updated reserves. Each action is a separate transaction. It checks proportional
+raw-token transfers, expected share minting/burning, restoration of the LP's
+share balance and total supply after each liquidity round trip, and the
+protective fee. Liquidity amounts follow the pool's fixed-point rounding;
+a round trip can leave raw-unit dust. The manifest records the join/exit
+transaction hashes and amounts under `liquidityChecks`. Existing local and
+fork settlement tests also exercise both explicit-pair helper APIs with
+`MAX_FEE` configured.
+
+### Economic test scope
+
+```sh
+FOUNDRY_LINT_LINT_ON_BUILD=false forge test --match-contract BCoWDirectSwapProtectionTest -vv
+```
+
+These tests execute real pool swaps and measure the arbitrageur's actual token
+balance deltas, valued at supplied external prices, before gas or external
+trading costs. They do not simulate external liquidity or solver competition.
+
+- The deterministic matrix covers all 42 M7 pair directions, both direct-swap
+  methods, and sizes of 0.01%, 1%, 10%, and 33.33% of the relevant reserve.
+  Every direction must have successful execution coverage for both methods.
+- Fuzz cases independently vary reserves between 0.5x and 2x the initial M7
+  amounts, token direction, swap method, and size. Exact-input sizes range from
+  0.01% through 50%; exact-output sizes range from 0.01% through 33.33%.
+- The economic inequality uses the worst price ratio in the range where every
+  token's external price is independently between $0.01 and $100: revenue at
+  $100 must not exceed cost at $0.01. Amounts are normalized for mixed decimals.
+  Fuzz cases also check the fee-adjusted marginal price against that ratio.
+- Swaps use permissive caller limits. At this fee, tiny outputs can round to
+  zero, and rounded quotes can violate the inherited spot/average-price check.
+  Only those specific numerical rejections are accepted, with unchanged pool
+  and trader balances; they are distinguished from successful economic checks.
+- An otherwise identical low-fee control must produce profitable arbitrage
+  through both methods after NVDA doubles while MSFT stays at $1. The protected
+  pool executes the same requested sizes at a loss to the arbitrageur.
+- Fee changes after finalization and swaps exceeding the inherited input/output
+  limits are explicitly rejected. The direct exact-output method has an output
+  cap, not an input-ratio cap, and may require very large gross inputs at this
+  fee; the test funds these inputs instead of relying on insufficient balances.
+
+These are bounded economic checks, not a universal prohibition of direct
+swaps. Extreme prices or reserve imbalances outside the tested domain can
+change the economics. The contracts still expose direct swaps and retain
+their configurable low default fee: callers creating pools outside the supplied
+scripts must set the protective fee themselves **before finalization**, after
+which it cannot be changed. A pool finalized at the wrong fee needs replacement.
+Disabling direct swaps remains a separate optional design choice.

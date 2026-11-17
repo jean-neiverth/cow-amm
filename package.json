@@ -21,6 +21,7 @@
     "local:demo": "npm run local:deploy && npm run local:settle",
     "test:local:settlement": "forge test --match-contract LocalSevenAssetCoWSettlementTest -vv",
     "test:local:rebalance": "npm run local:deploy && node script/local/m7.mjs rebalance --check",
+    "test:local:protection": "npm run local:deploy && node script/local/m7.mjs protection",
     "build": "forge build",
     "build:optimized": "FOUNDRY_PROFILE=optimized forge build",
     "coverage": "forge coverage --match-path 'test/unit/**'",

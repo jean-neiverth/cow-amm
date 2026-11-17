@@ -49,7 +49,7 @@ abstract contract BCoWHelperValidationFixture is Test {
       created.bind(address(token), balances[i], weights[i]);
     }
     // Deployed CoW pools deter the ordinary swap path with a high fee.
-    created.setSwapFee(1e18 - 1e12);
+    created.setSwapFee(helper.MAX_FEE());
     created.finalize();
     pool = BCoWPool(address(created));
   }

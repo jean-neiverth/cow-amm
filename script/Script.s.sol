@@ -2,7 +2,7 @@
 pragma solidity 0.8.25;
 
 import {IERC20} from '@openzeppelin/contracts/token/ERC20/IERC20.sol';
-import {IBPool} from 'contracts/BPool.sol';
+import {BPool, IBPool} from 'contracts/BPool.sol';
 import {IFaucet} from 'interfaces/IFaucet.sol';
 
 import {Script} from 'forge-std/Script.sol';
@@ -56,7 +56,11 @@ contract TestnetScript is BaseScript {
     bPool.bind(_SEPOLIA_DAI_TOKEN, 10e18, 1e18);
     bPool.bind(_SEPOLIA_USDC_TOKEN, 10e6, 1e18);
 
+    uint256 protectiveFee = BPool(address(bPool)).MAX_FEE();
+    bPool.setSwapFee(protectiveFee);
+    require(bPool.getSwapFee() == protectiveFee, 'Protective swap fee missing');
     bPool.finalize();
+    require(bPool.isFinalized() && bPool.getSwapFee() == protectiveFee, 'Protected finalization failed');
     vm.stopBroadcast();
   }
 }

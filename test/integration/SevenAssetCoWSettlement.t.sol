@@ -89,8 +89,11 @@ abstract contract SevenAssetSettlementChecks is Test {
       prices.push(1e18 * 10 ** (18 - decimals[i]));
       balancesBefore.push(balance);
     }
-    pool.setSwapFee(1e18 - 1e12);
+    pool.setSwapFee(pool.MAX_FEE());
+    assertEq(pool.getSwapFee(), pool.MAX_FEE());
     pool.finalize();
+    assertTrue(pool.isFinalized());
+    assertEq(pool.getSwapFee(), pool.MAX_FEE());
     supplyBefore = pool.totalSupply();
     lpSharesBefore = pool.balanceOf(address(this));
   }

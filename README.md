@@ -59,6 +59,8 @@ yarn test    # run the tests
 
 Run `npm run local:chain` in one terminal and `npm run local:demo` in another. This deploys CoW settlement and authentication, registers a local solver, creates an M7 portfolio, and executes and verifies signed orders on Anvil. No mainnet fork or submodule is required.
 
+Run `npm run test:local:protection` with Anvil running to verify proportional deposits/withdrawals before and after CoW settlement at the protective direct-swap fee.
+
 Run `npm run test:local:rebalance` with Anvil running to deploy a fresh pool and verify progressive rebalancing through separate settlements.
 
 See [the local M7 walkthrough](docs/local-m7.md) for prerequisites, commands, verification, and scope. Run `npm run test:local:settlement` for the corresponding tests without Anvil or an external RPC.
@@ -72,7 +74,7 @@ See [the local M7 walkthrough](docs/local-m7.md) for prerequisites, commands, ve
 - Bind tokens one by one by calling `IBPool.bind(token, amount, weight)`
   - The amount represents the initial balance of the token in the pool (pulled from the caller's balance)
   - The weight represents the intended distribution of value between the tokens in the pool
-- Modify the pool's swap fee by calling `IBPool.setSwapFee(fee)`
+- For a CoW pool, set the protective direct-swap fee to `MAX_FEE` (99.9999%) with `IBPool.setSwapFee(fee)` and verify it before finalization. The fee cannot be changed afterward. This setting does not charge CoW orders the direct-swap fee.
 - Finalize the pool by calling `IBPool.finalize()`
 
 # Deployments

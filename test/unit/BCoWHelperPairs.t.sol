@@ -35,7 +35,7 @@ contract BCoWHelperPairsTest is BCoWHelperValidationFixture {
       token.approve(address(created), balance);
       created.bind(address(token), balance, units[i] * 1e18);
     }
-    created.setSwapFee(1e18 - 1e12);
+    created.setSwapFee(helper.MAX_FEE());
     created.finalize();
     return BCoWPool(address(created));
   }
