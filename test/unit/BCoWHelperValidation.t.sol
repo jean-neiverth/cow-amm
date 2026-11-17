@@ -24,7 +24,7 @@ contract HelperValidationToken is ERC20 {
 }
 
 /// @notice PR review checks using actual pools and ERC20 balances, without a fork.
-contract BCoWHelperValidationTest is Test {
+abstract contract BCoWHelperValidationFixture is Test {
   BCoWFactory internal factory;
   BCoWHelper internal helper;
   address internal settlement;
@@ -77,7 +77,9 @@ contract BCoWHelperValidationTest is Test {
       prices[i] = 1e18;
     }
   }
+}
 
+contract BCoWHelperValidationTest is BCoWHelperValidationFixture {
   function test_M7AtEquilibriumHasNoOrder() public {
     BCoWPool pool = _m7();
     uint256[] memory prices = _prices(7);

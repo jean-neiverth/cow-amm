@@ -62,6 +62,9 @@ contract BCoWHelper is ICOWAMMPoolHelper, BMath, BCoWConst {
   /// @notice The supplied price vector does not match the pool tokens.
   error InvalidPriceVector();
 
+  /// @notice Amount is zero, rounds to zero, or exceeds quote limits.
+  error InvalidAmount();
+
   constructor(
     address factory_
   ) {
@@ -213,6 +216,72 @@ contract BCoWHelper is ICOWAMMPoolHelper, BMath, BCoWConst {
     return _orderFromBuyAmount(pool, reservesIn, amountIn, reservesOut);
   }
 
+  /// @notice Quote an explicit pair using raw token units, from the pool's perspective.
+  /// @dev Unsupported amounts revert rather than being capped.
+  /// @param pool Finalized pool registered with this helper's factory
+  /// @param buyToken Token received by the pool
+  /// @param sellToken Token sent by the pool
+  /// @param buyAmount Exact amount received
+  /// @return order_ Canonical pool order
+  /// @return preInteractions Commitment interaction
+  /// @return postInteractions Empty post-interactions
+  /// @return sig ERC-1271 signature including the pool address
+  function orderFromBuyAmount(
+    address pool,
+    address buyToken,
+    address sellToken,
+    uint256 buyAmount
+  )
+    external
+    view
+    returns (
+      GPv2Order.Data memory order_,
+      GPv2Interaction.Data[] memory preInteractions,
+      GPv2Interaction.Data[] memory postInteractions,
+      bytes memory sig
+    )
+  {
+    (Reserves memory reservesIn, Reserves memory reservesOut) = _pairReserves(pool, buyToken, sellToken);
+    if (buyAmount == 0 || buyAmount > bmul(reservesIn.balance, MAX_IN_RATIO)) revert InvalidAmount();
+    (order_, preInteractions, postInteractions, sig) = _orderFromBuyAmount(pool, reservesIn, buyAmount, reservesOut);
+    if (order_.sellAmount == 0) revert InvalidAmount();
+  }
+
+  /// @notice Quote an explicit pair using raw token units, from the pool's perspective.
+  /// @dev Unsupported amounts revert rather than being capped. Sell amounts are tentative.
+  /// @param pool Finalized pool registered with this helper's factory
+  /// @param sellToken Token sent by the pool
+  /// @param buyToken Token received by the pool
+  /// @param sellAmount Tentative amount sent; output is recomputed with forward math
+  /// @return order_ Canonical pool order
+  /// @return preInteractions Commitment interaction
+  /// @return postInteractions Empty post-interactions
+  /// @return sig ERC-1271 signature including the pool address
+  function orderFromSellAmount(
+    address pool,
+    address sellToken,
+    address buyToken,
+    uint256 sellAmount
+  )
+    external
+    view
+    returns (
+      GPv2Order.Data memory order_,
+      GPv2Interaction.Data[] memory preInteractions,
+      GPv2Interaction.Data[] memory postInteractions,
+      bytes memory sig
+    )
+  {
+    (Reserves memory reservesIn, Reserves memory reservesOut) = _pairReserves(pool, buyToken, sellToken);
+    if (sellAmount == 0 || sellAmount > bmul(reservesOut.balance, MAX_OUT_RATIO)) revert InvalidAmount();
+    uint256 amountIn = calcInGivenOut(
+      reservesIn.balance, reservesIn.denormWeight, reservesOut.balance, reservesOut.denormWeight, sellAmount, 0
+    );
+    if (amountIn == 0 || amountIn > bmul(reservesIn.balance, MAX_IN_RATIO)) revert InvalidAmount();
+    (order_, preInteractions, postInteractions, sig) = _orderFromBuyAmount(pool, reservesIn, amountIn, reservesOut);
+    if (order_.sellAmount == 0) revert InvalidAmount();
+  }
+
   /// @inheritdoc ICOWAMMPoolHelper
   function tokens(
     address pool
@@ -229,6 +298,24 @@ contract BCoWHelper is ICOWAMMPoolHelper, BMath, BCoWConst {
     if (tokens_.length < MIN_BOUND_TOKENS || tokens_.length > MAX_BOUND_TOKENS) {
       revert PoolDoesNotExist();
     }
+  }
+
+  function _pairReserves(
+    address pool,
+    address buyToken,
+    address sellToken
+  ) internal view returns (Reserves memory reservesIn, Reserves memory reservesOut) {
+    address[] memory poolTokens = tokens(pool);
+    if (buyToken == sellToken) revert InvalidToken();
+    bool hasBuy;
+    bool hasSell;
+    for (uint256 i; i < poolTokens.length; ++i) {
+      hasBuy = hasBuy || poolTokens[i] == buyToken;
+      hasSell = hasSell || poolTokens[i] == sellToken;
+    }
+    if (!hasBuy || !hasSell) revert InvalidToken();
+    reservesIn = _reserves(IBCoWPool(pool), IERC20(buyToken), 0);
+    reservesOut = _reserves(IBCoWPool(pool), IERC20(sellToken), 0);
   }
 
   /// @notice Helper method to compute the output of `orderFromBuyAmount`.

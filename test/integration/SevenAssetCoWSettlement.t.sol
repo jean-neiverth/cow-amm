@@ -14,6 +14,7 @@ import {BCoWHelper} from 'contracts/BCoWHelper.sol';
 import {BCoWPool} from 'contracts/BCoWPool.sol';
 import {Test} from 'forge-std/Test.sol';
 import {IBCoWPool} from 'interfaces/IBCoWPool.sol';
+import {IBPool} from 'interfaces/IBPool.sol';
 import {ISettlement} from 'interfaces/ISettlement.sol';
 
 contract SevenAssetSettlementToken is ERC20 {
@@ -53,6 +54,7 @@ abstract contract SevenAssetSettlementChecks is Test {
   uint256[] internal balancesBefore;
   uint256 internal supplyBefore;
   uint256 internal lpSharesBefore;
+  uint256 internal quoteMode;
 
   struct Batch {
     GPv2Order.Data order;
@@ -96,6 +98,35 @@ abstract contract SevenAssetSettlementChecks is Test {
   function test_SevenAssetSettlementPreservesSharesAndUntouchedReserves() public {
     prices[0] = prices[0] * 11 / 10;
     _executeAndVerify(true, solver);
+  }
+
+  function test_ExplicitBuyPairSettles() public {
+    quoteMode = 1;
+    prices[0] = prices[0] * 11 / 10;
+    _executeAndVerify(true, solver);
+  }
+
+  function test_ExplicitSellPairSettles() public {
+    quoteMode = 2;
+    prices[0] = prices[0] * 11 / 10;
+    _executeAndVerify(true, solver);
+  }
+
+  function test_SettlementRejectsSecondPoolCommitment() public {
+    prices[0] = prices[0] * 11 / 10;
+    Batch memory batch = _prepareBatch(true);
+    GPv2Interaction.Data memory first = batch.interactions[0][0];
+    batch.interactions[0] = new GPv2Interaction.Data[](2);
+    batch.interactions[0][0] = first;
+    batch.interactions[0][1] = GPv2Interaction.Data({
+      target: address(pool), value: 0, callData: abi.encodeWithSelector(pool.commit.selector, bytes32('second-order'))
+    });
+    vm.expectRevert(IBPool.BPool_Reentrancy.selector);
+    vm.prank(solver);
+    settlement.settle(tokens, batch.clearingPrices, batch.trades, batch.interactions);
+    for (uint256 i; i < 7; ++i) {
+      assertEq(tokens[i].balanceOf(address(pool)), balancesBefore[i]);
+    }
   }
 
   function test_LargePriceMoveSettlesWithBoundedCandidate() public {
@@ -146,6 +177,15 @@ abstract contract SevenAssetSettlementChecks is Test {
     GPv2Interaction.Data[] memory pre;
     bytes memory poolSig;
     (batch.order, pre,, poolSig) = helper.order(address(pool), prices);
+    if (quoteMode == 1) {
+      (batch.order, pre,, poolSig) = helper.orderFromBuyAmount(
+        address(pool), address(batch.order.buyToken), address(batch.order.sellToken), batch.order.buyAmount
+      );
+    } else if (quoteMode == 2) {
+      (batch.order, pre,, poolSig) = helper.orderFromSellAmount(
+        address(pool), address(batch.order.sellToken), address(batch.order.buyToken), batch.order.sellAmount
+      );
+    }
     pool.verify(batch.order);
     (batch.sellIndex, batch.buyIndex) = _indices(batch.order);
 

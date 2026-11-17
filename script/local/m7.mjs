@@ -127,15 +127,18 @@ function trade(order, sellTokenIndex, buyTokenIndex, signature, signatureFlag) {
   };
 }
 
-async function settleM7() {
-  const state = await load();
+async function settleM7(state, prices, result, quiet = false) {
+  state ??= await load();
   const settlement = await contract('GPv2Settlement', state.settlement, solver);
-  const helper = await contract('BCoWHelper', state.helper);
   const pool = await contract('BCoWPool', state.pool);
-  const prices = state.tokens.map((token) => 10n ** BigInt(36 - token.decimals));
-  // Synthetic reference prices: all start at $1; NVDA rises 10%.
-  prices[0] = prices[0] * 11n / 10n;
-  const result = await helper.order(state.pool, prices.map(String));
+  if (!prices) {
+    prices = state.tokens.map((token) => 10n ** BigInt(36 - token.decimals));
+    prices[0] = prices[0] * 11n / 10n;
+  }
+  if (!result) {
+    const helper = await contract('BCoWHelper', state.helper);
+    result = await helper.order(state.pool, prices.map(String));
+  }
   const order = asOrder(result[0]);
   await pool.verify(order);
   const indexOf = (address) => state.tokens.findIndex((token) => token.address.toLowerCase() === address.toLowerCase());
@@ -179,10 +182,11 @@ async function settleM7() {
   };
   await save(state);
   console.log(`Settled ${state.tokens[sellIndex].symbol} -> ${state.tokens[buyIndex].symbol}: ${receipt.transactionHash}`);
-  await verifyM7(state);
+  await verifyM7(state, quiet);
+  return state.lastSettlement;
 }
 
-async function verifyM7(state) {
+async function verifyM7(state, quiet = false) {
   state ??= await load();
   const last = state.lastSettlement;
   assert.ok(last, 'Run local:settle before verifying');
@@ -208,7 +212,7 @@ async function verifyM7(state) {
   const beforeInvariant = pairInvariant(state, last.beforeBalances, last.sellIndex, last.buyIndex);
   const afterInvariant = pairInvariant(state, after, last.sellIndex, last.buyIndex);
   assert.ok(afterInvariant > beforeInvariant, 'Weighted invariant did not increase');
-  console.table(state.tokens.map((token, index) => ({
+  if (!quiet) console.table(state.tokens.map((token, index) => ({
     token: token.symbol, target: `${token.weight / 40 * 100}%`,
     before: ethers.utils.formatUnits(last.beforeBalances[index], token.decimals),
     after: ethers.utils.formatUnits(after[index], token.decimals),
@@ -217,13 +221,77 @@ async function verifyM7(state) {
   console.log(`LP surplus: ${ethers.utils.formatUnits(BigInt(last.received) - BigInt(last.minimum), state.tokens[last.buyIndex].decimals)} ${state.tokens[last.buyIndex].symbol}`);
 }
 
+// Fixed-point total variation distance from the target portfolio weights.
+// Prices are values per raw token unit, so mixed decimals cancel naturally.
+const driftScale = 1_000_000_000_000n;
+function allocationDrift(state, reserves, prices) {
+  const values = reserves.map((amount, index) => BigInt(amount) * prices[index]);
+  const total = values.reduce((sum, value) => sum + value, 0n);
+  const weightTotal = state.tokens.reduce((sum, token) => sum + BigInt(token.weight), 0n);
+  const distance = values.reduce((sum, value, index) => {
+    const delta = value * driftScale / total - BigInt(state.tokens[index].weight) * driftScale / weightTotal;
+    return sum + (delta < 0n ? -delta : delta);
+  }, 0n);
+  return distance / 2n;
+}
+
+function isNoOrder(error) {
+  const selector = ethers.utils.id('NoOrder()').slice(0, 10);
+  return error?.errorName === 'NoOrder' || error?.data === selector || error?.error?.data === selector || error?.error?.error?.data === selector;
+}
+
+async function rebalanceM7() {
+  const state = await load();
+  const helper = await contract('BCoWHelper', state.helper);
+  const shock = [150n, 80n, 120n, 90n, 110n, 70n, 130n];
+  const prices = state.tokens.map((token, index) => 10n ** BigInt(36 - token.decimals) * shock[index] / 100n);
+  const initialDrift = allocationDrift(state, await balances(state), prices);
+  const tolerance = driftScale / 1000n; // 0.1 percentage points of total variation distance.
+  const maxIterations = 64;
+  const steps = [];
+  let finalDrift = initialDrift;
+  let stopReason = 'iteration-limit';
+  for (let iteration = 0; iteration < maxIterations; ++iteration) {
+    if (finalDrift <= tolerance) { stopReason = 'drift-tolerance'; break; }
+    let result;
+    try { result = await helper.order(state.pool, prices.map(String)); }
+    catch (error) {
+      if (!isNoOrder(error)) throw error;
+      stopReason = 'no-order';
+      break;
+    }
+    // Each invocation sends a separate transaction, allowing the transient
+    // pool commitment to clear naturally before the next settlement.
+    const last = await settleM7(state, prices, result, true);
+    finalDrift = allocationDrift(state, await balances(state), prices);
+    steps.push({ transactionHash: last.transactionHash, sellIndex: last.sellIndex,
+      buyIndex: last.buyIndex, drift: finalDrift.toString() });
+    console.log(`Settlement ${steps.length}: allocation drift ${Number(finalDrift) / Number(driftScale) * 100}%`);
+  }
+  if (finalDrift <= tolerance) stopReason = 'drift-tolerance';
+  state.rebalance = { prices: prices.map(String), initialDrift: initialDrift.toString(),
+    finalDrift: finalDrift.toString(), driftScale: driftScale.toString(),
+    tolerance: tolerance.toString(), maxIterations, stopReason, steps };
+  await save(state);
+  console.log(`Rebalance stopped: ${stopReason}; ${steps.length} settlements; drift ${Number(initialDrift) / 1e10}% -> ${Number(finalDrift) / 1e10}%`);
+  if (process.argv.includes('--check')) {
+    assert.ok(steps.length >= 3, 'Expected several separate settlements');
+    const pairs = new Set(steps.map(({ sellIndex, buyIndex }) => [sellIndex, buyIndex].sort().join(':')));
+    assert.ok(pairs.size > 1, 'Expected more than one selected pair');
+    assert.equal(new Set(steps.map(({ transactionHash }) => transactionHash)).size, steps.length);
+    assert.ok(finalDrift < initialDrift, 'Allocation drift did not improve');
+    assert.notEqual(stopReason, 'iteration-limit', 'Scenario did not finish within its iteration budget');
+  }
+}
+
 try {
   assert.equal((await provider.getNetwork()).chainId, chainId, `Expected local chain ${chainId}`);
   switch (process.argv[2]) {
     case 'deploy': await deployM7(); break;
     case 'settle': await settleM7(); break;
     case 'verify': await verifyM7(); break;
-    default: throw new Error('Usage: node script/local/m7.mjs deploy|settle|verify');
+    case 'rebalance': await rebalanceM7(); break;
+    default: throw new Error('Usage: node script/local/m7.mjs deploy|settle|verify|rebalance [--check]');
   }
 } catch (error) {
   console.error(error.reason ?? error.message);

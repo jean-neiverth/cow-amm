@@ -105,3 +105,69 @@ The existing fork integration suite remains available separately and requires an
 ## Scope
 
 This demonstrates real local deployment, signing, authorization, token-moving settlement, and resulting state. It supplies a price and a funded counterparty directly. Solver competition, external liquidity routing, public-network registration, and demonstrated LVR protection remain separate work.
+
+## Explicit token-pair orders
+
+The helper has four-argument overloads for pools with two through eight tokens:
+
+```solidity
+helper.orderFromBuyAmount(pool, buyToken, sellToken, buyAmount);
+helper.orderFromSellAmount(pool, sellToken, buyToken, sellAmount);
+```
+
+Directions are from the pool's perspective: the pool receives `buyToken` and
+sends `sellToken`. All amounts use raw token units. The buy amount is exact;
+the sell amount is tentative because the helper inverse-quotes the incoming
+amount and recomputes output using the forward math checked by the pool.
+Callers must use the amounts in the returned order.
+
+Both tokens must be distinct members of a finalized pool registered with the
+helper's factory. `InvalidToken` rejects invalid pairs. `InvalidAmount` rejects
+zero amounts, output rounded to zero, incoming amounts above `MAX_IN_RATIO`,
+and tentative outgoing amounts above `MAX_OUT_RATIO`. Requests are rejected,
+not silently capped. The forward-recomputed sell amount can differ slightly
+from the tentative output cap because Balancer's power math is approximate.
+The pool's verification remains the authority for order validity.
+
+The existing three-argument methods retain their two-token behavior and reject
+larger pools because the other token would be ambiguous. Ethers v5 callers
+must select overloaded methods by their full signatures, for example:
+
+```js
+await helper['orderFromBuyAmount(address,address,address,uint256)'](
+  pool, buyToken, sellToken, buyAmount,
+);
+```
+
+## Progressive rebalancing
+
+With Anvil running, execute a fresh deterministic scenario:
+
+```sh
+npm run test:local:rebalance
+```
+
+This deploys a fresh pool, applies fixed synthetic price multipliers
+`[1.5, 0.8, 1.2, 0.9, 1.1, 0.7, 1.3]`, and repeatedly asks `order()` for a new
+pairwise order against current reserves. Each settlement is a separate actual
+transaction so the transient commitment clears naturally. It keeps one pool
+order per settlement and verifies every settlement against fresh pool and
+trader balance snapshots, including unchanged LP shares, five untouched
+reserves, and weighted invariant growth.
+
+Allocation drift is half the sum of absolute differences between current value
+weights and target weights, calculated at the same fixed reference prices.
+It stops at drift at or below 0.1 percentage points, `NoOrder`, or 64 settlements.
+The command checks that at least three settlements occurred, more than one
+unordered pair was used, final drift is below initial drift, and the iteration
+limit was not reached. Exact convergence and optimal pair sequences are not
+claimed. The scenario uses a funded counterparty and supplied prices, as the
+single-settlement demo does; it does not establish solver competition or LVR
+protection.
+
+To rebalance an existing local deployment instead, run `npm run local:rebalance`.
+This command uses the same fixed price scenario and bounds but does not assert
+a minimum number of trades: an already balanced pool may stop immediately.
+The deployment manifest records prices, initial/final drift, tolerance,
+stopping reason, and each settlement's transaction hash, pair, and drift under
+`rebalance`. `local:verify` continues to verify the most recent settlement.
