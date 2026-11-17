@@ -59,6 +59,8 @@ yarn test    # run the tests
 
 Run `npm run local:chain` in one terminal and `npm run local:demo` in another. This deploys CoW settlement and authentication, registers a local solver, creates an M7 portfolio, and executes and verifies signed orders on Anvil. No mainnet fork or submodule is required.
 
+Run `npm run test:local:auction` with Anvil running to compare a funded local solver auction against ordinary weighted-AMM arbitrage. It exports JSON/CSV accounting reports and supports independent historical-state verification with `npm run local:auction:verify`. See [the auction methodology](docs/local-auction.md) for assumptions and limits.
+
 Run `npm run test:local:protection` with Anvil running to verify proportional deposits/withdrawals before and after CoW settlement at the protective direct-swap fee.
 
 Run `npm run test:local:rebalance` with Anvil running to deploy a fresh pool and verify progressive rebalancing through separate settlements.

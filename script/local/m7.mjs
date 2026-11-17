@@ -348,17 +348,24 @@ async function rebalanceM7() {
   }
 }
 
-try {
-  assert.equal((await provider.getNetwork()).chainId, chainId, `Expected local chain ${chainId}`);
-  switch (process.argv[2]) {
-    case 'deploy': await deployM7(); break;
-    case 'settle': await settleM7(); break;
-    case 'verify': await verifyM7(); break;
-    case 'rebalance': await rebalanceM7(); break;
-    case 'protection': await protectionM7(); break;
-    default: throw new Error('Usage: node script/local/m7.mjs deploy|settle|verify|rebalance [--check]|protection');
+async function main() {
+  try {
+    assert.equal((await provider.getNetwork()).chainId, chainId, `Expected local chain ${chainId}`);
+    switch (process.argv[2]) {
+      case 'deploy': await deployM7(); break;
+      case 'settle': await settleM7(); break;
+      case 'verify': await verifyM7(); break;
+      case 'rebalance': await rebalanceM7(); break;
+      case 'protection': await protectionM7(); break;
+      default: throw new Error('Usage: node script/local/m7.mjs deploy|settle|verify|rebalance [--check]|protection');
+    }
+  } catch (error) {
+    console.error(error.reason ?? error.message);
+    process.exitCode = 1;
   }
-} catch (error) {
-  console.error(error.reason ?? error.message);
-  process.exitCode = 1;
 }
+
+export { root, provider, accounts, manager, solver, trader, chainId, artifact, contract, deploy,
+  deployM7, load, asOrder, trade, orderTuple, pairInvariant, allocationDrift, isNoOrder };
+
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) await main();
